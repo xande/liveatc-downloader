@@ -17,6 +17,7 @@ class LiveATCDownloaderGUI:
         
         self.stations_data = []
         self.downloading = False
+        self.download_cancelled = False
         
         self.create_widgets()
         
@@ -137,11 +138,18 @@ class LiveATCDownloaderGUI:
         self.browse_btn = ttk.Button(output_frame, text="Browse...", command=self.browse_output)
         self.browse_btn.grid(row=0, column=1)
         
-        # ===== DOWNLOAD BUTTON =====
+        # ===== DOWNLOAD BUTTONS =====
         row += 1
-        self.download_btn = ttk.Button(main_frame, text="Download Archives", 
+        button_frame = ttk.Frame(main_frame)
+        button_frame.grid(row=row, column=0, columnspan=2, pady=(10, 10))
+        
+        self.download_btn = ttk.Button(button_frame, text="Download Archives", 
                                        command=self.start_download, state='disabled')
-        self.download_btn.grid(row=row, column=0, columnspan=2, pady=(10, 10))
+        self.download_btn.grid(row=0, column=0, padx=(0, 5))
+        
+        self.cancel_btn = ttk.Button(button_frame, text="Stop Download", 
+                                     command=self.cancel_download, state='disabled')
+        self.cancel_btn.grid(row=0, column=1)
         
         # ===== PROGRESS LOG =====
         row += 1
@@ -254,6 +262,14 @@ class LiveATCDownloaderGUI:
             self.output_entry.delete(0, tk.END)
             self.output_entry.insert(0, folder)
             
+    def cancel_download(self):
+        """Cancel ongoing download"""
+        if self.downloading:
+            self.download_cancelled = True
+            self.log("Download cancelled by user")
+            self.set_status("Cancelling download...")
+            self.cancel_btn.config(state='disabled')
+    
     def start_download(self):
         """Start download process"""
         # Validate inputs
@@ -302,8 +318,10 @@ class LiveATCDownloaderGUI:
         
         # Disable controls
         self.download_btn.config(state='disabled')
+        self.cancel_btn.config(state='normal')
         self.search_btn.config(state='disabled')
         self.downloading = True
+        self.download_cancelled = False
         
         # Start download in background
         thread = threading.Thread(target=self._download_thread, 
@@ -325,6 +343,11 @@ class LiveATCDownloaderGUI:
         self.root.after(0, self.log, f"Output folder: {output_folder}\n")
         
         while current <= end_datetime:
+            # Check if download was cancelled
+            if self.download_cancelled:
+                self.root.after(0, self.log, f"\nDownload cancelled after {downloaded + failed} files")
+                break
+            
             date_str = current.strftime('%b-%d-%Y')
             time_str = current.strftime('%H%MZ')
             
@@ -357,7 +380,10 @@ class LiveATCDownloaderGUI:
             current += timedelta(minutes=30)
         
         # Summary
-        self.root.after(0, self.log, f"\n=== Download Complete ===")
+        if not self.download_cancelled:
+            self.root.after(0, self.log, f"\n=== Download Complete ===")
+        else:
+            self.root.after(0, self.log, f"\n=== Download Stopped ===")
         self.root.after(0, self.log, f"Successfully downloaded: {downloaded} files")
         self.root.after(0, self.log, f"Failed: {failed} files")
         
@@ -367,13 +393,22 @@ class LiveATCDownloaderGUI:
     def _download_complete(self, downloaded, failed):
         """Handle download completion"""
         self.download_btn.config(state='normal')
+        self.cancel_btn.config(state='disabled')
         self.search_btn.config(state='normal')
         self.downloading = False
-        self.set_status(f"Download complete: {downloaded} successful, {failed} failed")
         
-        if downloaded > 0:
+        if self.download_cancelled:
+            self.set_status(f"Download stopped: {downloaded} successful, {failed} failed")
+        else:
+            self.set_status(f"Download complete: {downloaded} successful, {failed} failed")
+        
+        if downloaded > 0 and not self.download_cancelled:
             messagebox.showinfo("Download Complete", 
                               f"Downloaded {downloaded} file(s)\nFailed: {failed}\n\n"
+                              f"Files saved to:\n{self.output_entry.get()}")
+        elif downloaded > 0 and self.download_cancelled:
+            messagebox.showinfo("Download Stopped", 
+                              f"Download cancelled.\n\nDownloaded {downloaded} file(s) before stopping\nFailed: {failed}\n\n"
                               f"Files saved to:\n{self.output_entry.get()}")
 
 
