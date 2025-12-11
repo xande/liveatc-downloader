@@ -36,6 +36,51 @@ def download(args):
   download_archive(args.station, date, time)
 
 
+def download_range(args):
+  """Download archives for a date/time range"""
+  # Parse start and end times
+  start_date = datetime.strptime(args.start, '%b-%d-%Y-%H%MZ')
+  
+  if args.end:
+    end_date = datetime.strptime(args.end, '%b-%d-%Y-%H%MZ')
+  else:
+    end_date = datetime.utcnow()
+  
+  current = start_date
+  downloaded_files = []
+  failed_files = []
+  
+  print(f"Downloading archives from {start_date} to {end_date}")
+  print(f"Station: {args.station}\n")
+  
+  # Download in 30-minute intervals
+  while current <= end_date:
+    date_str = current.strftime('%b-%d-%Y')
+    time_str = current.strftime('%H%MZ')
+    
+    try:
+      filepath = download_archive(args.station, date_str, time_str)
+      downloaded_files.append(filepath)
+      print(f"[OK] Downloaded {date_str} {time_str}")
+    except Exception as e:
+      error_msg = str(e)
+      failed_files.append((f"{date_str} {time_str}", error_msg))
+      print(f"[FAIL] Failed to download {date_str} {time_str}: {error_msg}")
+    
+    current += timedelta(minutes=30)
+  
+  print(f"\n=== Summary ===")
+  print(f"Successfully downloaded: {len(downloaded_files)} files")
+  print(f"Failed: {len(failed_files)} files")
+  
+  if failed_files and len(failed_files) <= 10:
+    print(f"\nFailed downloads:")
+    for time_period, error in failed_files[:10]:
+      print(f"  {time_period}: {error}")
+  
+  return downloaded_files
+
+
 if __name__ == '__main__':
   args = get_args()
   print(args)
@@ -44,3 +89,5 @@ if __name__ == '__main__':
     stations(args)
   elif args.command == 'download':
     download(args)
+  elif args.command == 'download-range':
+    download_range(args)
