@@ -4,6 +4,7 @@ A Python tool for downloading and processing archived Air Traffic Control (ATC) 
 
 ## Features
 
+- 🖥️ **GUI Application**: User-friendly graphical interface for easy downloads
 - 🔍 **Search Stations**: List all available ATC frequencies for any airport by ICAO code
 - 📥 **Download Archives**: Download individual 30-minute MP3 archives
 - 📦 **Bulk Downloads**: Download multiple archives across a date/time range
@@ -14,6 +15,7 @@ A Python tool for downloading and processing archived Air Traffic Control (ATC) 
 
 - [Installation](#installation)
 - [Quick Start](#quick-start)
+- [GUI Application](#gui-application)
 - [Usage](#usage)
   - [List Available Stations](#list-available-stations)
   - [Download Single Archive](#download-single-archive)
@@ -61,6 +63,22 @@ You should see the command usage information.
 
 ## Quick Start
 
+### Using the GUI (Recommended for Beginners)
+
+```bash
+python gui.py
+```
+
+This will launch a graphical interface where you can:
+1. Enter an airport ICAO code (e.g., KPDX)
+2. Search for available stations
+3. Select a station from the list
+4. Set start and end times (UTC/Zulu)
+5. Choose output folder
+6. Click "Download Archives"
+
+### Using the Command Line
+
 ```bash
 # List all ATC stations for Portland International Airport
 python main.py stations KPDX
@@ -71,6 +89,47 @@ python main.py download kpdx_app
 # Download all archives from Dec 10, 2025 00:00Z to Dec 11, 2025 15:00Z
 python main.py download-range kpdx_app Dec-10-2025-0000Z -e Dec-11-2025-1500Z
 ```
+
+## GUI Application
+
+The GUI provides a user-friendly interface with the following features:
+
+### Features
+
+- **Airport Search**: Enter ICAO code and search for all available stations
+- **Station List**: View all stations with online/offline status (● = online, ○ = offline)
+- **Station Details**: See frequencies and status when selecting a station
+- **Time Range**: Set start and end times in UTC/Zulu format
+- **Output Folder**: Browse and select where to save downloaded files
+- **Download Progress**: Real-time log showing download status
+- **Summary**: Shows successful and failed downloads when complete
+
+### Running the GUI
+
+```bash
+python gui.py
+```
+
+### GUI Screenshot Description
+
+The interface includes:
+- **Airport ICAO Code** input field with Search button
+- **Available Stations** list showing all stations for the airport
+- **Selected Station** info showing frequencies and status
+- **Time Range** inputs for start/end date and time (UTC)
+- **Output Folder** selector with browse button
+- **Download Archives** button to start the process
+- **Download Log** showing real-time progress
+- **Status Bar** at the bottom showing current operation
+
+### GUI Tips
+
+- All times are in **UTC/Zulu** (no timezone conversion needed)
+- Date format: `Dec-11-2025`
+- Time format: `1430Z` (24-hour format with Z suffix)
+- Default output folder is `~/Downloads`
+- Downloads run in background thread so the UI stays responsive
+- Close the window to cancel an ongoing download
 
 ## Usage
 
@@ -276,6 +335,7 @@ If you see encoding errors in PowerShell, the output uses ASCII-safe markers (`[
 ```
 liveatc-downloader/
 ├── main.py              # Main entry point and CLI handlers
+├── gui.py               # GUI application (tkinter)
 ├── cli.py               # Command-line argument parsing
 ├── liveatc.py           # Core download and scraping logic
 ├── audio_utils.py       # Audio processing utilities
