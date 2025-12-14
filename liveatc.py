@@ -67,8 +67,13 @@ def download_archive(station, date, time):
   url = f'https://archive.liveatc.net/{airport_code}/{filename}'
   
   import time as time_module
-  import subprocess
-  import sys
+  import urllib3
+  urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+  # Use browser User-Agent to avoid being blocked
+  headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+  }
 
   # Retry logic with exponential backoff
   max_retries = 3
@@ -76,43 +81,18 @@ def download_archive(station, date, time):
     try:
       print(f"Downloading: {url}")
 
-      # Try using curl first (works better with archive.liveatc.net)
-      try:
-        # Use curl if available - it handles archive.liveatc.net better than Python requests
-        result = subprocess.run(
-          ['curl', '-f', '-L', '--max-time', '30', '-o', path, url],
-          capture_output=True,
-          text=True,
-          timeout=35
-        )
-        if result.returncode == 0:
-          return path
-        else:
-          # curl failed, try requests as fallback
-          raise Exception(f"curl failed: {result.stderr}")
-      except (FileNotFoundError, Exception) as curl_error:
-        # curl not available or failed, use requests library
-        print(f"  Trying Python requests (curl unavailable/failed)...")
-        import urllib3
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+      # Use requests library with SSL verification disabled
+      response = requests.get(url, timeout=30, stream=True, verify=False, headers=headers)
+      response.raise_for_status()
 
-        # Use browser User-Agent to avoid being blocked
-        headers = {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-        }
+      # Write the file in chunks
+      with open(path, 'wb') as f:
+        for chunk in response.iter_content(chunk_size=8192):
+          if chunk:
+            f.write(chunk)
+      return path
 
-        # Try without SSL verification since archive.liveatc.net has issues
-        response = requests.get(url, timeout=30, stream=True, verify=False, headers=headers)
-        response.raise_for_status()
-
-        # Write the file in chunks
-        with open(path, 'wb') as f:
-          for chunk in response.iter_content(chunk_size=8192):
-            if chunk:
-              f.write(chunk)
-        return path
-
-    except (subprocess.TimeoutExpired, requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
       if attempt < max_retries - 1:
         wait_time = 2 ** attempt  # 1, 2, 4 seconds
         print(f"  Timeout/Connection error, retrying in {wait_time}s...")

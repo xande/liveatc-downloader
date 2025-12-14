@@ -4,8 +4,11 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 from datetime import datetime, timedelta
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from queue import Queue
 from liveatc import get_stations, download_archive
 import os
+import time
 
 try:
     from tkcalendar import DateEntry
@@ -116,15 +119,19 @@ class LiveATCDownloaderGUI:
             self.start_date_entry.insert(0, current_time.strftime('%b-%d-%Y'))
         self.start_date_entry.grid(row=0, column=1, padx=(0, 5))
 
-        # Start time - Hour dropdown
-        self.start_hour = ttk.Combobox(time_frame, width=4, values=[f"{h:02d}" for h in range(24)], state='readonly')
+        # Start time - Hour spinbox (00-23)
+        self.start_hour = tk.Spinbox(time_frame, from_=0, to=23, width=4, format="%02.0f",
+                                     wrap=True, state='readonly', readonlybackground='white')
         self.start_hour.grid(row=0, column=2, padx=(0, 2))
-        self.start_hour.set('00')
+        self.start_hour.delete(0, tk.END)
+        self.start_hour.insert(0, '00')
 
-        # Start time - Minute dropdown
-        self.start_minute = ttk.Combobox(time_frame, width=4, values=['00', '30'], state='readonly')
+        # Start time - Minute spinbox (00 or 30 only)
+        self.start_minute = tk.Spinbox(time_frame, values=['00', '30'], width=4,
+                                       wrap=True, state='readonly', readonlybackground='white')
         self.start_minute.grid(row=0, column=3, padx=(0, 2))
-        self.start_minute.set('00')
+        self.start_minute.delete(0, tk.END)
+        self.start_minute.insert(0, '00')
 
         ttk.Label(time_frame, text="Z").grid(row=0, column=4, sticky=tk.W, padx=(0, 15))
 
@@ -143,23 +150,27 @@ class LiveATCDownloaderGUI:
             self.end_date_entry.insert(0, current_time.strftime('%b-%d-%Y'))
         self.end_date_entry.grid(row=0, column=6, padx=(0, 5))
 
-        # End time - Hour dropdown
+        # End time - Hour spinbox (00-23)
         minutes = (current_time.minute // 30) * 30
         rounded_time = current_time.replace(minute=minutes, second=0, microsecond=0)
-        self.end_hour = ttk.Combobox(time_frame, width=4, values=[f"{h:02d}" for h in range(24)], state='readonly')
+        self.end_hour = tk.Spinbox(time_frame, from_=0, to=23, width=4, format="%02.0f",
+                                   wrap=True, state='readonly', readonlybackground='white')
         self.end_hour.grid(row=0, column=7, padx=(0, 2))
-        self.end_hour.set(f"{rounded_time.hour:02d}")
+        self.end_hour.delete(0, tk.END)
+        self.end_hour.insert(0, f"{rounded_time.hour:02d}")
 
-        # End time - Minute dropdown
-        self.end_minute = ttk.Combobox(time_frame, width=4, values=['00', '30'], state='readonly')
+        # End time - Minute spinbox (00 or 30 only)
+        self.end_minute = tk.Spinbox(time_frame, values=['00', '30'], width=4,
+                                     wrap=True, state='readonly', readonlybackground='white')
         self.end_minute.grid(row=0, column=8, padx=(0, 2))
-        self.end_minute.set(f"{rounded_time.minute:02d}")
+        self.end_minute.delete(0, tk.END)
+        self.end_minute.insert(0, f"{rounded_time.minute:02d}")
 
         ttk.Label(time_frame, text="Z").grid(row=0, column=9, sticky=tk.W)
 
         # Format help
         row += 1
-        help_text = "Click date to open calendar (use arrow keys to navigate)  |  Time is in UTC/Zulu" if HAVE_CALENDAR else "Date format: Dec-11-2025  |  Time is in UTC/Zulu (24-hour)"
+        help_text = "Click date to open calendar | Use arrow keys or click arrows to adjust time | Time is in UTC/Zulu" if HAVE_CALENDAR else "Date format: Dec-11-2025 | Use arrow keys or click arrows to adjust time | Time is in UTC/Zulu"
         ttk.Label(main_frame, text=help_text,
                  foreground='gray', font=('Arial', 8)).grid(
             row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
@@ -181,20 +192,34 @@ class LiveATCDownloaderGUI:
         self.browse_btn = ttk.Button(output_frame, text="Browse...", command=self.browse_output)
         self.browse_btn.grid(row=0, column=1)
 
-        # ===== DELAY SETTING =====
+        # ===== DOWNLOAD SETTINGS =====
         row += 1
-        delay_frame = ttk.Frame(main_frame)
-        delay_frame.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(5, 10))
+        settings_frame = ttk.Frame(main_frame)
+        settings_frame.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(5, 10))
 
-        ttk.Label(delay_frame, text="Delay between downloads:", font=('Arial', 9)).grid(
+        # Thread count
+        ttk.Label(settings_frame, text="Concurrent downloads:", font=('Arial', 9)).grid(
             row=0, column=0, sticky=tk.W, padx=(0, 5))
 
-        self.delay_entry = ttk.Entry(delay_frame, width=8)
-        self.delay_entry.grid(row=0, column=1, padx=(0, 5))
-        self.delay_entry.insert(0, '10')
+        self.thread_count = tk.Spinbox(settings_frame, from_=1, to=10, width=4,
+                                       wrap=True, state='readonly', readonlybackground='white')
+        self.thread_count.grid(row=0, column=1, padx=(0, 5))
+        self.thread_count.delete(0, tk.END)
+        self.thread_count.insert(0, '3')
 
-        ttk.Label(delay_frame, text="seconds (to avoid rate-limiting)",
-                 foreground='gray', font=('Arial', 8)).grid(row=0, column=2, sticky=tk.W)
+        ttk.Label(settings_frame, text="threads", font=('Arial', 9)).grid(
+            row=0, column=2, sticky=tk.W, padx=(0, 15))
+
+        # Delay between downloads
+        ttk.Label(settings_frame, text="Delay between downloads:", font=('Arial', 9)).grid(
+            row=0, column=3, sticky=tk.W, padx=(0, 5))
+
+        self.delay_entry = ttk.Entry(settings_frame, width=8)
+        self.delay_entry.grid(row=0, column=4, padx=(0, 5))
+        self.delay_entry.insert(0, '2')
+
+        ttk.Label(settings_frame, text="seconds (per thread, to avoid rate-limiting)",
+                 foreground='gray', font=('Arial', 8)).grid(row=0, column=5, sticky=tk.W)
         
         # ===== DOWNLOAD BUTTONS =====
         row += 1
@@ -353,8 +378,9 @@ class LiveATCDownloaderGUI:
         end_time = f"{self.end_hour.get()}{self.end_minute.get()}Z"
         output_folder = self.output_entry.get().strip()
         delay_str = self.delay_entry.get().strip()
+        thread_count_str = self.thread_count.get().strip()
 
-        if not all([start_date, end_date, output_folder, delay_str]):
+        if not all([start_date, end_date, output_folder, delay_str, thread_count_str]):
             messagebox.showwarning("Input Required", "Please fill in all fields")
             return
 
@@ -365,7 +391,17 @@ class LiveATCDownloaderGUI:
                 messagebox.showwarning("Invalid Delay", "Delay must be a positive number")
                 return
         except ValueError:
-            messagebox.showwarning("Invalid Delay", "Delay must be a number (e.g., 10)")
+            messagebox.showwarning("Invalid Delay", "Delay must be a number (e.g., 2)")
+            return
+
+        # Validate thread count
+        try:
+            num_threads = int(thread_count_str)
+            if num_threads < 1 or num_threads > 10:
+                messagebox.showwarning("Invalid Thread Count", "Thread count must be between 1 and 10")
+                return
+        except ValueError:
+            messagebox.showwarning("Invalid Thread Count", "Thread count must be a number")
             return
         
         # Validate output folder
@@ -403,67 +439,101 @@ class LiveATCDownloaderGUI:
         
         # Start download in background
         thread = threading.Thread(target=self._download_thread,
-                                 args=(station, start_datetime, end_datetime, output_folder, delay))
+                                 args=(station, start_datetime, end_datetime, output_folder, delay, num_threads))
         thread.daemon = True
         thread.start()
         
-    def _download_thread(self, station, start_datetime, end_datetime, output_folder, delay):
-        """Background thread for downloading"""
-        import time
+    def _download_thread(self, station, start_datetime, end_datetime, output_folder, delay, num_threads):
+        """Background thread for downloading with multithreading support"""
+        import shutil
+
+        # Generate list of all time intervals to download
+        intervals = []
         current = start_datetime
+        while current <= end_datetime:
+            intervals.append(current)
+            current += timedelta(minutes=30)
+
+        total_intervals = len(intervals)
         downloaded = 0
         failed = 0
-
-        total_intervals = int((end_datetime - start_datetime).total_seconds() / 1800)  # 30 min = 1800 sec
 
         self.root.after(0, self.log, f"Starting download for {station['identifier']}")
         self.root.after(0, self.log, f"Time range: {start_datetime} to {end_datetime} UTC")
         self.root.after(0, self.log, f"Total intervals: {total_intervals}")
         self.root.after(0, self.log, f"Output folder: {output_folder}")
-        self.root.after(0, self.log, f"Delay between downloads: {delay} seconds\n")
-        
-        while current <= end_datetime:
-            # Check if download was cancelled
+        self.root.after(0, self.log, f"Using {num_threads} concurrent thread(s)")
+        self.root.after(0, self.log, f"Delay between downloads: {delay} seconds (per thread)\n")
+
+        def download_single_interval(interval_time):
+            """Download a single time interval"""
             if self.download_cancelled:
-                self.root.after(0, self.log, f"\nDownload cancelled after {downloaded + failed} files")
-                break
-            
-            date_str = current.strftime('%b-%d-%Y')
-            time_str = current.strftime('%H%MZ')
-            
-            progress = f"[{downloaded + failed + 1}/{total_intervals}]"
-            
+                return None
+
+            date_str = interval_time.strftime('%b-%d-%Y')
+            time_str = interval_time.strftime('%H%MZ')
+
             try:
-                self.root.after(0, self.set_status, f"Downloading {date_str} {time_str}...")
-                
                 # Download to temp location first
                 filepath = download_archive(station['identifier'], date_str, time_str)
-                
+
                 # Move to output folder
                 filename = os.path.basename(filepath)
                 dest_path = os.path.join(output_folder, filename)
-                
-                # Move file (handle cross-platform)
-                import shutil
                 shutil.move(filepath, dest_path)
-                
-                downloaded += 1
-                self.root.after(0, self.log, f"{progress} [OK] {date_str} {time_str} -> {filename}")
 
-                # Add delay after successful download (except for the last one)
-                if current + timedelta(minutes=30) <= end_datetime and delay > 0:
-                    self.root.after(0, self.log, f"  Waiting {delay}s before next download...")
-                    time.sleep(delay)
-
+                return {'success': True, 'date': date_str, 'time': time_str, 'filename': filename}
             except Exception as e:
-                failed += 1
                 error_msg = str(e)
                 if len(error_msg) > 100:
                     error_msg = error_msg[:100] + "..."
-                self.root.after(0, self.log, f"{progress} [FAIL] {date_str} {time_str}: {error_msg}")
+                return {'success': False, 'date': date_str, 'time': time_str, 'error': error_msg}
 
-            current += timedelta(minutes=30)
-        
+        # Use ThreadPoolExecutor for concurrent downloads
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            # Submit all download tasks
+            futures = []
+            for idx, interval in enumerate(intervals):
+                if self.download_cancelled:
+                    break
+                future = executor.submit(download_single_interval, interval)
+                futures.append((future, idx + 1, interval))
+
+                # Add delay between submissions to stagger the threads
+                if delay > 0 and idx < len(intervals) - 1:
+                    time.sleep(delay / num_threads)
+
+            # Process results as they complete
+            for future, idx, interval in futures:
+                if self.download_cancelled:
+                    # Cancel remaining futures
+                    future.cancel()
+                    continue
+
+                try:
+                    result = future.result()
+                    if result is None:
+                        # Task was cancelled
+                        continue
+
+                    progress = f"[{idx}/{total_intervals}]"
+
+                    if result['success']:
+                        downloaded += 1
+                        self.root.after(0, self.log,
+                                      f"{progress} [OK] {result['date']} {result['time']} -> {result['filename']}")
+                        self.root.after(0, self.set_status,
+                                      f"Progress: {downloaded + failed}/{total_intervals} ({downloaded} OK, {failed} failed)")
+                    else:
+                        failed += 1
+                        self.root.after(0, self.log,
+                                      f"{progress} [FAIL] {result['date']} {result['time']}: {result['error']}")
+                        self.root.after(0, self.set_status,
+                                      f"Progress: {downloaded + failed}/{total_intervals} ({downloaded} OK, {failed} failed)")
+                except Exception as e:
+                    failed += 1
+                    self.root.after(0, self.log, f"[{idx}/{total_intervals}] [ERROR] Unexpected error: {str(e)}")
+
         # Summary
         if not self.download_cancelled:
             self.root.after(0, self.log, f"\n=== Download Complete ===")
@@ -471,7 +541,7 @@ class LiveATCDownloaderGUI:
             self.root.after(0, self.log, f"\n=== Download Stopped ===")
         self.root.after(0, self.log, f"Successfully downloaded: {downloaded} files")
         self.root.after(0, self.log, f"Failed: {failed} files")
-        
+
         # Re-enable controls
         self.root.after(0, self._download_complete, downloaded, failed)
         
