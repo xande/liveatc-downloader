@@ -108,15 +108,15 @@ class LiveATCDownloaderGUI:
         ttk.Label(time_frame, text="Start:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
 
         if HAVE_CALENDAR:
-            # Use calendar date picker with arrow key navigation
-            self.start_date_entry = DateEntry(time_frame, width=15, background='darkblue',
-                                             foreground='white', borderwidth=2,
-                                             date_pattern='mm-dd-y')
+            # Use calendar date picker - simplified configuration for compatibility
+            self.start_date_entry = DateEntry(time_frame, width=12,
+                                             date_pattern='mm/dd/y',
+                                             showweeknumbers=False)
             self.start_date_entry.set_date(current_time)
         else:
             # Fallback to text entry
-            self.start_date_entry = ttk.Entry(time_frame, width=15)
-            self.start_date_entry.insert(0, current_time.strftime('%b-%d-%Y'))
+            self.start_date_entry = ttk.Entry(time_frame, width=12)
+            self.start_date_entry.insert(0, current_time.strftime('%m/%d/%Y'))
         self.start_date_entry.grid(row=0, column=1, padx=(0, 5))
 
         # Start time - Hour spinbox (00-23)
@@ -141,15 +141,15 @@ class LiveATCDownloaderGUI:
         ttk.Label(time_frame, text="End:").grid(row=0, column=5, sticky=tk.W, padx=(0, 5))
 
         if HAVE_CALENDAR:
-            # Use calendar date picker with arrow key navigation
-            self.end_date_entry = DateEntry(time_frame, width=15, background='darkblue',
-                                           foreground='white', borderwidth=2,
-                                           date_pattern='mm-dd-y')
+            # Use calendar date picker - simplified configuration for compatibility
+            self.end_date_entry = DateEntry(time_frame, width=12,
+                                           date_pattern='mm/dd/y',
+                                           showweeknumbers=False)
             self.end_date_entry.set_date(current_time)
         else:
             # Fallback to text entry
-            self.end_date_entry = ttk.Entry(time_frame, width=15)
-            self.end_date_entry.insert(0, current_time.strftime('%b-%d-%Y'))
+            self.end_date_entry = ttk.Entry(time_frame, width=12)
+            self.end_date_entry.insert(0, current_time.strftime('%m/%d/%Y'))
         self.end_date_entry.grid(row=0, column=6, padx=(0, 5))
 
         # End time - Hour spinbox (00-23)
@@ -174,7 +174,7 @@ class LiveATCDownloaderGUI:
 
         # Format help
         row += 1
-        help_text = "Click date to open calendar | Click spinbox arrows to adjust time | Time is in UTC/Zulu" if HAVE_CALENDAR else "Date format: Dec-11-2025 | Click spinbox arrows to adjust time | Time is in UTC/Zulu"
+        help_text = "Click date to open calendar | Click spinbox arrows to adjust time | Time is in UTC/Zulu" if HAVE_CALENDAR else "Date format: MM/DD/YYYY | Click spinbox arrows to adjust time | Time is in UTC/Zulu"
         ttk.Label(main_frame, text=help_text,
                  foreground='gray', font=('Arial', 8)).grid(
             row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
@@ -373,11 +373,15 @@ class LiveATCDownloaderGUI:
 
         # Get dates - handle both DateEntry and regular Entry widgets
         if HAVE_CALENDAR:
+            # Convert mm/dd/y format to Mon-DD-YYYY format for parsing
             start_date = self.start_date_entry.get_date().strftime('%b-%d-%Y')
             end_date = self.end_date_entry.get_date().strftime('%b-%d-%Y')
         else:
-            start_date = self.start_date_entry.get().strip()
-            end_date = self.end_date_entry.get().strip()
+            # Parse mm/dd/yyyy to Mon-DD-YYYY format
+            start_input = self.start_date_entry.get().strip()
+            end_input = self.end_date_entry.get().strip()
+            start_date = datetime.strptime(start_input, '%m/%d/%Y').strftime('%b-%d-%Y')
+            end_date = datetime.strptime(end_input, '%m/%d/%Y').strftime('%b-%d-%Y')
 
         start_time = f"{self.start_hour.get()}{self.start_minute.get()}Z"
         end_time = f"{self.end_hour.get()}{self.end_minute.get()}Z"
