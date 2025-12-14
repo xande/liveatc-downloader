@@ -10,6 +10,211 @@ from liveatc import get_stations, download_archive
 import os
 import time
 
+try:
+    from tkcalendar import Calendar
+    CALENDAR_AVAILABLE = True
+except ImportError:
+    CALENDAR_AVAILABLE = False
+
+
+class DatePickerEntry(ttk.Frame):
+    """Custom date picker with calendar dropdown, auto-formatting, and arrow key support"""
+
+    def __init__(self, parent, initial_date=None, **kwargs):
+        super().__init__(parent)
+
+        if initial_date is None:
+            initial_date = datetime.now()
+
+        self.current_date = initial_date
+        self.calendar_window = None
+
+        # Create entry field
+        self.entry = ttk.Entry(self, width=12, justify='center')
+        self.entry.pack(side=tk.LEFT, padx=(0, 2))
+
+        # Create calendar button
+        self.cal_btn = ttk.Button(self, text="📅", width=3, command=self.show_calendar)
+        self.cal_btn.pack(side=tk.LEFT)
+
+        # Set initial value
+        self._update_entry()
+
+        # Bind events for auto-formatting and arrow keys
+        self.entry.bind('<KeyRelease>', self._on_key_release)
+        self.entry.bind('<Up>', self._on_arrow_up)
+        self.entry.bind('<Down>', self._on_arrow_down)
+        self.entry.bind('<FocusOut>', self._validate_on_blur)
+
+    def _update_entry(self):
+        """Update entry field with current date"""
+        self.entry.delete(0, tk.END)
+        self.entry.insert(0, self.current_date.strftime('%m/%d/%Y'))
+
+    def _on_key_release(self, event):
+        """Auto-format date as user types"""
+        if event.keysym in ('Up', 'Down', 'Left', 'Right', 'Tab', 'Shift_L', 'Shift_R'):
+            return
+
+        text = self.entry.get()
+        # Remove any non-digits
+        digits = ''.join(c for c in text if c.isdigit())
+
+        # Auto-format with slashes
+        if len(digits) <= 2:
+            formatted = digits
+        elif len(digits) <= 4:
+            formatted = f"{digits[:2]}/{digits[2:]}"
+        else:
+            formatted = f"{digits[:2]}/{digits[2:4]}/{digits[4:8]}"
+
+        # Update entry if changed
+        if formatted != text:
+            cursor_pos = self.entry.index(tk.INSERT)
+            self.entry.delete(0, tk.END)
+            self.entry.insert(0, formatted)
+            # Try to maintain cursor position
+            self.entry.icursor(min(cursor_pos + (1 if len(formatted) > len(text) else 0), len(formatted)))
+
+    def _get_cursor_part(self):
+        """Determine which part of date (month/day/year) cursor is in"""
+        cursor_pos = self.entry.index(tk.INSERT)
+        text = self.entry.get()
+
+        if not text or '/' not in text:
+            return 'month'
+
+        parts = text.split('/')
+        if cursor_pos <= len(parts[0]):
+            return 'month'
+        elif cursor_pos <= len(parts[0]) + 1 + (len(parts[1]) if len(parts) > 1 else 0):
+            return 'day'
+        else:
+            return 'year'
+
+    def _on_arrow_up(self, event):
+        """Increment date part under cursor"""
+        try:
+            self._parse_current_entry()
+            part = self._get_cursor_part()
+
+            if part == 'month':
+                self.current_date = self.current_date.replace(month=self.current_date.month % 12 + 1) if self.current_date.month < 12 else self.current_date.replace(month=1, year=self.current_date.year + 1)
+            elif part == 'day':
+                self.current_date += timedelta(days=1)
+            elif part == 'year':
+                self.current_date = self.current_date.replace(year=self.current_date.year + 1)
+
+            self._update_entry()
+        except:
+            pass
+        return 'break'
+
+    def _on_arrow_down(self, event):
+        """Decrement date part under cursor"""
+        try:
+            self._parse_current_entry()
+            part = self._get_cursor_part()
+
+            if part == 'month':
+                self.current_date = self.current_date.replace(month=self.current_date.month - 1) if self.current_date.month > 1 else self.current_date.replace(month=12, year=self.current_date.year - 1)
+            elif part == 'day':
+                self.current_date -= timedelta(days=1)
+            elif part == 'year':
+                self.current_date = self.current_date.replace(year=self.current_date.year - 1)
+
+            self._update_entry()
+        except:
+            pass
+        return 'break'
+
+    def _parse_current_entry(self):
+        """Try to parse current entry text to update current_date"""
+        text = self.entry.get()
+        try:
+            self.current_date = datetime.strptime(text, '%m/%d/%Y')
+        except:
+            pass  # Keep previous date if parse fails
+
+    def _validate_on_blur(self, event):
+        """Validate and reformat date when user leaves field"""
+        text = self.entry.get()
+        try:
+            parsed = datetime.strptime(text, '%m/%d/%Y')
+            self.current_date = parsed
+            self._update_entry()
+        except:
+            # Reset to current valid date if invalid
+            self._update_entry()
+
+    def show_calendar(self):
+        """Show calendar popup for date selection"""
+        if not CALENDAR_AVAILABLE:
+            messagebox.showinfo("Calendar Not Available",
+                              "tkcalendar is not installed.\nYou can still type the date or use arrow keys.")
+            return
+
+        if self.calendar_window is not None:
+            return  # Already showing
+
+        # Parse current date
+        self._parse_current_entry()
+
+        # Create popup window
+        self.calendar_window = tk.Toplevel(self)
+        self.calendar_window.title("Select Date")
+        self.calendar_window.transient(self)
+        self.calendar_window.grab_set()
+
+        # Create calendar widget
+        cal = Calendar(self.calendar_window, selectmode='day',
+                      year=self.current_date.year,
+                      month=self.current_date.month,
+                      day=self.current_date.day)
+        cal.pack(padx=10, pady=10)
+
+        def on_select():
+            selected = cal.get_date()
+            try:
+                self.current_date = datetime.strptime(selected, '%m/%d/%y')
+                # Handle two-digit year properly
+                if self.current_date.year < 2000:
+                    self.current_date = self.current_date.replace(year=self.current_date.year + 100)
+                self._update_entry()
+            except:
+                pass
+            self.calendar_window.destroy()
+            self.calendar_window = None
+
+        def on_close():
+            self.calendar_window.destroy()
+            self.calendar_window = None
+
+        # Buttons
+        btn_frame = ttk.Frame(self.calendar_window)
+        btn_frame.pack(pady=(0, 10))
+
+        ttk.Button(btn_frame, text="Select", command=on_select).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=on_close).pack(side=tk.LEFT, padx=5)
+
+        self.calendar_window.protocol("WM_DELETE_WINDOW", on_close)
+
+        # Center the window
+        self.calendar_window.update_idletasks()
+        x = self.winfo_rootx()
+        y = self.winfo_rooty() + self.winfo_height()
+        self.calendar_window.geometry(f"+{x}+{y}")
+
+    def get(self):
+        """Get current date value as string in MM/DD/YYYY format"""
+        self._parse_current_entry()
+        return self.current_date.strftime('%m/%d/%Y')
+
+    def get_datetime(self):
+        """Get current date value as datetime object"""
+        self._parse_current_entry()
+        return self.current_date
+
 
 class LiveATCDownloaderGUI:
     def __init__(self, root):
@@ -101,9 +306,8 @@ class LiveATCDownloaderGUI:
         # Start time
         ttk.Label(time_frame, text="Start:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
 
-        # Date entry with validation (simpler and more reliable)
-        self.start_date_entry = ttk.Entry(time_frame, width=12, justify='center')
-        self.start_date_entry.insert(0, current_time.strftime('%m/%d/%Y'))
+        # Date picker with calendar dropdown
+        self.start_date_entry = DatePickerEntry(time_frame, initial_date=current_time)
         self.start_date_entry.grid(row=0, column=1, padx=(0, 5))
 
         # Start time - Hour spinbox (00-23)
@@ -125,14 +329,13 @@ class LiveATCDownloaderGUI:
         # End time
         ttk.Label(time_frame, text="End:").grid(row=0, column=5, sticky=tk.W, padx=(0, 5))
 
-        # Date entry with validation (simpler and more reliable)
-        self.end_date_entry = ttk.Entry(time_frame, width=12, justify='center')
-        self.end_date_entry.insert(0, current_time.strftime('%m/%d/%Y'))
+        # Date picker with calendar dropdown
+        minutes = (current_time.minute // 30) * 30
+        rounded_time = current_time.replace(minute=minutes, second=0, microsecond=0)
+        self.end_date_entry = DatePickerEntry(time_frame, initial_date=rounded_time)
         self.end_date_entry.grid(row=0, column=6, padx=(0, 5))
 
         # End time - Hour spinbox (00-23)
-        minutes = (current_time.minute // 30) * 30
-        rounded_time = current_time.replace(minute=minutes, second=0, microsecond=0)
         self.end_hour = tk.Spinbox(time_frame, from_=0, to=23, width=4, format="%02.0f",
                                    wrap=True, justify='center')
         self.end_hour.grid(row=0, column=7, padx=(0, 2))
@@ -150,7 +353,7 @@ class LiveATCDownloaderGUI:
 
         # Format help
         row += 1
-        help_text = "Date format: MM/DD/YYYY (e.g. 12/14/2025) | Click spinbox arrows to adjust time | Time is in UTC/Zulu"
+        help_text = "Click 📅 for calendar | Type date (auto-formats) | Use ↑↓ arrows to adjust date/time | Time is in UTC/Zulu"
         ttk.Label(main_frame, text=help_text,
                  foreground='gray', font=('Arial', 8)).grid(
             row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
