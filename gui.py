@@ -111,9 +111,12 @@ class LiveATCDownloaderGUI:
             # Use calendar date picker with arrow key navigation
             self.start_date_entry = DateEntry(time_frame, width=15, background='darkblue',
                                              foreground='white', borderwidth=2,
-                                             date_pattern='MMM-dd-yyyy',
-                                             state='readonly')
+                                             date_pattern='mm-dd-y')
             self.start_date_entry.set_date(current_time)
+            # Make readonly by blocking all keyboard input (only calendar button works)
+            self.start_date_entry.bind('<Key>', lambda e: 'break')
+            self.start_date_entry.bind('<BackSpace>', lambda e: 'break')
+            self.start_date_entry.bind('<Delete>', lambda e: 'break')
         else:
             # Fallback to text entry
             self.start_date_entry = ttk.Entry(time_frame, width=15)
@@ -149,9 +152,12 @@ class LiveATCDownloaderGUI:
             # Use calendar date picker with arrow key navigation
             self.end_date_entry = DateEntry(time_frame, width=15, background='darkblue',
                                            foreground='white', borderwidth=2,
-                                           date_pattern='MMM-dd-yyyy',
-                                           state='readonly')
+                                           date_pattern='mm-dd-y')
             self.end_date_entry.set_date(current_time)
+            # Make readonly by blocking all keyboard input (only calendar button works)
+            self.end_date_entry.bind('<Key>', lambda e: 'break')
+            self.end_date_entry.bind('<BackSpace>', lambda e: 'break')
+            self.end_date_entry.bind('<Delete>', lambda e: 'break')
         else:
             # Fallback to text entry
             self.end_date_entry = ttk.Entry(time_frame, width=15)
