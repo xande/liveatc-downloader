@@ -4,14 +4,216 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 from datetime import datetime, timedelta
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from queue import Queue
 from liveatc import get_stations, download_archive
 import os
+import time
 
 try:
-    from tkcalendar import DateEntry
-    HAVE_CALENDAR = True
+    from tkcalendar import Calendar
+    CALENDAR_AVAILABLE = True
 except ImportError:
-    HAVE_CALENDAR = False
+    CALENDAR_AVAILABLE = False
+
+
+class DatePickerEntry(ttk.Frame):
+    """Custom date picker with calendar dropdown, auto-formatting, and arrow key support"""
+
+    def __init__(self, parent, initial_date=None, **kwargs):
+        super().__init__(parent)
+
+        if initial_date is None:
+            initial_date = datetime.now()
+
+        self.current_date = initial_date
+        self.calendar_window = None
+
+        # Create entry field
+        self.entry = ttk.Entry(self, width=12, justify='center')
+        self.entry.pack(side=tk.LEFT, padx=(0, 2))
+
+        # Create calendar button
+        self.cal_btn = ttk.Button(self, text="📅", width=3, command=self.show_calendar)
+        self.cal_btn.pack(side=tk.LEFT)
+
+        # Set initial value
+        self._update_entry()
+
+        # Bind events for auto-formatting and arrow keys
+        self.entry.bind('<KeyRelease>', self._on_key_release)
+        self.entry.bind('<Up>', self._on_arrow_up)
+        self.entry.bind('<Down>', self._on_arrow_down)
+        self.entry.bind('<FocusOut>', self._validate_on_blur)
+
+    def _update_entry(self):
+        """Update entry field with current date"""
+        self.entry.delete(0, tk.END)
+        self.entry.insert(0, self.current_date.strftime('%m/%d/%Y'))
+
+    def _on_key_release(self, event):
+        """Auto-format date as user types"""
+        if event.keysym in ('Up', 'Down', 'Left', 'Right', 'Tab', 'Shift_L', 'Shift_R'):
+            return
+
+        text = self.entry.get()
+        # Remove any non-digits
+        digits = ''.join(c for c in text if c.isdigit())
+
+        # Auto-format with slashes
+        if len(digits) <= 2:
+            formatted = digits
+        elif len(digits) <= 4:
+            formatted = f"{digits[:2]}/{digits[2:]}"
+        else:
+            formatted = f"{digits[:2]}/{digits[2:4]}/{digits[4:8]}"
+
+        # Update entry if changed
+        if formatted != text:
+            cursor_pos = self.entry.index(tk.INSERT)
+            self.entry.delete(0, tk.END)
+            self.entry.insert(0, formatted)
+            # Try to maintain cursor position
+            self.entry.icursor(min(cursor_pos + (1 if len(formatted) > len(text) else 0), len(formatted)))
+
+    def _get_cursor_part(self):
+        """Determine which part of date (month/day/year) cursor is in"""
+        cursor_pos = self.entry.index(tk.INSERT)
+        text = self.entry.get()
+
+        if not text or '/' not in text:
+            return 'month'
+
+        parts = text.split('/')
+        if cursor_pos <= len(parts[0]):
+            return 'month'
+        elif cursor_pos <= len(parts[0]) + 1 + (len(parts[1]) if len(parts) > 1 else 0):
+            return 'day'
+        else:
+            return 'year'
+
+    def _on_arrow_up(self, event):
+        """Increment date part under cursor"""
+        try:
+            self._parse_current_entry()
+            part = self._get_cursor_part()
+
+            if part == 'month':
+                self.current_date = self.current_date.replace(month=self.current_date.month % 12 + 1) if self.current_date.month < 12 else self.current_date.replace(month=1, year=self.current_date.year + 1)
+            elif part == 'day':
+                self.current_date += timedelta(days=1)
+            elif part == 'year':
+                self.current_date = self.current_date.replace(year=self.current_date.year + 1)
+
+            self._update_entry()
+        except:
+            pass
+        return 'break'
+
+    def _on_arrow_down(self, event):
+        """Decrement date part under cursor"""
+        try:
+            self._parse_current_entry()
+            part = self._get_cursor_part()
+
+            if part == 'month':
+                self.current_date = self.current_date.replace(month=self.current_date.month - 1) if self.current_date.month > 1 else self.current_date.replace(month=12, year=self.current_date.year - 1)
+            elif part == 'day':
+                self.current_date -= timedelta(days=1)
+            elif part == 'year':
+                self.current_date = self.current_date.replace(year=self.current_date.year - 1)
+
+            self._update_entry()
+        except:
+            pass
+        return 'break'
+
+    def _parse_current_entry(self):
+        """Try to parse current entry text to update current_date"""
+        text = self.entry.get()
+        try:
+            self.current_date = datetime.strptime(text, '%m/%d/%Y')
+        except:
+            pass  # Keep previous date if parse fails
+
+    def _validate_on_blur(self, event):
+        """Validate and reformat date when user leaves field"""
+        text = self.entry.get()
+        try:
+            parsed = datetime.strptime(text, '%m/%d/%Y')
+            self.current_date = parsed
+            self._update_entry()
+        except:
+            # Reset to current valid date if invalid
+            self._update_entry()
+
+    def show_calendar(self):
+        """Show calendar popup for date selection"""
+        if not CALENDAR_AVAILABLE:
+            messagebox.showinfo("Calendar Not Available",
+                              "tkcalendar is not installed.\nYou can still type the date or use arrow keys.")
+            return
+
+        if self.calendar_window is not None:
+            return  # Already showing
+
+        # Parse current date
+        self._parse_current_entry()
+
+        # Create popup window
+        self.calendar_window = tk.Toplevel(self)
+        self.calendar_window.title("Select Date")
+        self.calendar_window.transient(self)
+        self.calendar_window.grab_set()
+
+        # Create calendar widget
+        cal = Calendar(self.calendar_window, selectmode='day',
+                      year=self.current_date.year,
+                      month=self.current_date.month,
+                      day=self.current_date.day)
+        cal.pack(padx=10, pady=10)
+
+        def on_select():
+            selected = cal.get_date()
+            try:
+                self.current_date = datetime.strptime(selected, '%m/%d/%y')
+                # Handle two-digit year properly
+                if self.current_date.year < 2000:
+                    self.current_date = self.current_date.replace(year=self.current_date.year + 100)
+                self._update_entry()
+            except:
+                pass
+            self.calendar_window.destroy()
+            self.calendar_window = None
+
+        def on_close():
+            self.calendar_window.destroy()
+            self.calendar_window = None
+
+        # Buttons
+        btn_frame = ttk.Frame(self.calendar_window)
+        btn_frame.pack(pady=(0, 10))
+
+        ttk.Button(btn_frame, text="Select", command=on_select).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=on_close).pack(side=tk.LEFT, padx=5)
+
+        self.calendar_window.protocol("WM_DELETE_WINDOW", on_close)
+
+        # Center the window
+        self.calendar_window.update_idletasks()
+        x = self.winfo_rootx()
+        y = self.winfo_rooty() + self.winfo_height()
+        self.calendar_window.geometry(f"+{x}+{y}")
+
+    def get(self):
+        """Get current date value as string in MM/DD/YYYY format"""
+        self._parse_current_entry()
+        return self.current_date.strftime('%m/%d/%Y')
+
+    def get_datetime(self):
+        """Get current date value as datetime object"""
+        self._parse_current_entry()
+        return self.current_date
 
 
 class LiveATCDownloaderGUI:
@@ -104,62 +306,54 @@ class LiveATCDownloaderGUI:
         # Start time
         ttk.Label(time_frame, text="Start:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
 
-        if HAVE_CALENDAR:
-            # Use calendar date picker with arrow key navigation
-            self.start_date_entry = DateEntry(time_frame, width=15, background='darkblue',
-                                             foreground='white', borderwidth=2,
-                                             date_pattern='M-dd-yyyy')
-            self.start_date_entry.set_date(current_time)
-        else:
-            # Fallback to text entry
-            self.start_date_entry = ttk.Entry(time_frame, width=15)
-            self.start_date_entry.insert(0, current_time.strftime('%b-%d-%Y'))
+        # Date picker with calendar dropdown
+        self.start_date_entry = DatePickerEntry(time_frame, initial_date=current_time)
         self.start_date_entry.grid(row=0, column=1, padx=(0, 5))
 
-        # Start time - Hour dropdown
-        self.start_hour = ttk.Combobox(time_frame, width=4, values=[f"{h:02d}" for h in range(24)], state='readonly')
+        # Start time - Hour spinbox (00-23)
+        self.start_hour = tk.Spinbox(time_frame, from_=0, to=23, width=4, format="%02.0f",
+                                     wrap=True, justify='center')
         self.start_hour.grid(row=0, column=2, padx=(0, 2))
-        self.start_hour.set('00')
+        self.start_hour.delete(0, tk.END)
+        self.start_hour.insert(0, '00')
 
-        # Start time - Minute dropdown
-        self.start_minute = ttk.Combobox(time_frame, width=4, values=['00', '30'], state='readonly')
+        # Start time - Minute spinbox (00 or 30 only)
+        self.start_minute = tk.Spinbox(time_frame, values=('00', '30'), width=4,
+                                       wrap=True, justify='center')
         self.start_minute.grid(row=0, column=3, padx=(0, 2))
-        self.start_minute.set('00')
+        self.start_minute.delete(0, tk.END)
+        self.start_minute.insert(0, '00')
 
         ttk.Label(time_frame, text="Z").grid(row=0, column=4, sticky=tk.W, padx=(0, 15))
 
         # End time
         ttk.Label(time_frame, text="End:").grid(row=0, column=5, sticky=tk.W, padx=(0, 5))
 
-        if HAVE_CALENDAR:
-            # Use calendar date picker with arrow key navigation
-            self.end_date_entry = DateEntry(time_frame, width=15, background='darkblue',
-                                           foreground='white', borderwidth=2,
-                                           date_pattern='M-dd-yyyy')
-            self.end_date_entry.set_date(current_time)
-        else:
-            # Fallback to text entry
-            self.end_date_entry = ttk.Entry(time_frame, width=15)
-            self.end_date_entry.insert(0, current_time.strftime('%b-%d-%Y'))
-        self.end_date_entry.grid(row=0, column=6, padx=(0, 5))
-
-        # End time - Hour dropdown
+        # Date picker with calendar dropdown
         minutes = (current_time.minute // 30) * 30
         rounded_time = current_time.replace(minute=minutes, second=0, microsecond=0)
-        self.end_hour = ttk.Combobox(time_frame, width=4, values=[f"{h:02d}" for h in range(24)], state='readonly')
-        self.end_hour.grid(row=0, column=7, padx=(0, 2))
-        self.end_hour.set(f"{rounded_time.hour:02d}")
+        self.end_date_entry = DatePickerEntry(time_frame, initial_date=rounded_time)
+        self.end_date_entry.grid(row=0, column=6, padx=(0, 5))
 
-        # End time - Minute dropdown
-        self.end_minute = ttk.Combobox(time_frame, width=4, values=['00', '30'], state='readonly')
+        # End time - Hour spinbox (00-23)
+        self.end_hour = tk.Spinbox(time_frame, from_=0, to=23, width=4, format="%02.0f",
+                                   wrap=True, justify='center')
+        self.end_hour.grid(row=0, column=7, padx=(0, 2))
+        self.end_hour.delete(0, tk.END)
+        self.end_hour.insert(0, f"{rounded_time.hour:02d}")
+
+        # End time - Minute spinbox (00 or 30 only)
+        self.end_minute = tk.Spinbox(time_frame, values=('00', '30'), width=4,
+                                     wrap=True, justify='center')
         self.end_minute.grid(row=0, column=8, padx=(0, 2))
-        self.end_minute.set(f"{rounded_time.minute:02d}")
+        self.end_minute.delete(0, tk.END)
+        self.end_minute.insert(0, f"{rounded_time.minute:02d}")
 
         ttk.Label(time_frame, text="Z").grid(row=0, column=9, sticky=tk.W)
 
         # Format help
         row += 1
-        help_text = "Click date to open calendar (use arrow keys to navigate)  |  Time is in UTC/Zulu" if HAVE_CALENDAR else "Date format: Dec-11-2025  |  Time is in UTC/Zulu (24-hour)"
+        help_text = "Click 📅 for calendar | Type date (auto-formats) | Use ↑↓ arrows to adjust date/time | Time is in UTC/Zulu"
         ttk.Label(main_frame, text=help_text,
                  foreground='gray', font=('Arial', 8)).grid(
             row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
@@ -181,20 +375,34 @@ class LiveATCDownloaderGUI:
         self.browse_btn = ttk.Button(output_frame, text="Browse...", command=self.browse_output)
         self.browse_btn.grid(row=0, column=1)
 
-        # ===== DELAY SETTING =====
+        # ===== DOWNLOAD SETTINGS =====
         row += 1
-        delay_frame = ttk.Frame(main_frame)
-        delay_frame.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(5, 10))
+        settings_frame = ttk.Frame(main_frame)
+        settings_frame.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(5, 10))
 
-        ttk.Label(delay_frame, text="Delay between downloads:", font=('Arial', 9)).grid(
+        # Thread count
+        ttk.Label(settings_frame, text="Concurrent downloads:", font=('Arial', 9)).grid(
             row=0, column=0, sticky=tk.W, padx=(0, 5))
 
-        self.delay_entry = ttk.Entry(delay_frame, width=8)
-        self.delay_entry.grid(row=0, column=1, padx=(0, 5))
-        self.delay_entry.insert(0, '10')
+        self.thread_count = tk.Spinbox(settings_frame, from_=1, to=10, width=4,
+                                       wrap=True, justify='center')
+        self.thread_count.grid(row=0, column=1, padx=(0, 5))
+        self.thread_count.delete(0, tk.END)
+        self.thread_count.insert(0, '3')
 
-        ttk.Label(delay_frame, text="seconds (to avoid rate-limiting)",
-                 foreground='gray', font=('Arial', 8)).grid(row=0, column=2, sticky=tk.W)
+        ttk.Label(settings_frame, text="threads", font=('Arial', 9)).grid(
+            row=0, column=2, sticky=tk.W, padx=(0, 15))
+
+        # Delay between downloads
+        ttk.Label(settings_frame, text="Delay between downloads:", font=('Arial', 9)).grid(
+            row=0, column=3, sticky=tk.W, padx=(0, 5))
+
+        self.delay_entry = ttk.Entry(settings_frame, width=8)
+        self.delay_entry.grid(row=0, column=4, padx=(0, 5))
+        self.delay_entry.insert(0, '2')
+
+        ttk.Label(settings_frame, text="seconds (per thread, to avoid rate-limiting)",
+                 foreground='gray', font=('Arial', 8)).grid(row=0, column=5, sticky=tk.W)
         
         # ===== DOWNLOAD BUTTONS =====
         row += 1
@@ -341,20 +549,25 @@ class LiveATCDownloaderGUI:
 
         station = self.selected_station
 
-        # Get dates - handle both DateEntry and regular Entry widgets
-        if HAVE_CALENDAR:
-            start_date = self.start_date_entry.get_date().strftime('%b-%d-%Y')
-            end_date = self.end_date_entry.get_date().strftime('%b-%d-%Y')
-        else:
-            start_date = self.start_date_entry.get().strip()
-            end_date = self.end_date_entry.get().strip()
+        # Get and validate dates
+        start_input = self.start_date_entry.get().strip()
+        end_input = self.end_date_entry.get().strip()
+
+        try:
+            start_date = datetime.strptime(start_input, '%m/%d/%Y').strftime('%b-%d-%Y')
+            end_date = datetime.strptime(end_input, '%m/%d/%Y').strftime('%b-%d-%Y')
+        except ValueError:
+            messagebox.showerror("Date Format Error",
+                               "Invalid date format. Please use MM/DD/YYYY\n\nExample: 12/14/2025")
+            return
 
         start_time = f"{self.start_hour.get()}{self.start_minute.get()}Z"
         end_time = f"{self.end_hour.get()}{self.end_minute.get()}Z"
         output_folder = self.output_entry.get().strip()
         delay_str = self.delay_entry.get().strip()
+        thread_count_str = self.thread_count.get().strip()
 
-        if not all([start_date, end_date, output_folder, delay_str]):
+        if not all([start_date, end_date, output_folder, delay_str, thread_count_str]):
             messagebox.showwarning("Input Required", "Please fill in all fields")
             return
 
@@ -365,7 +578,17 @@ class LiveATCDownloaderGUI:
                 messagebox.showwarning("Invalid Delay", "Delay must be a positive number")
                 return
         except ValueError:
-            messagebox.showwarning("Invalid Delay", "Delay must be a number (e.g., 10)")
+            messagebox.showwarning("Invalid Delay", "Delay must be a number (e.g., 2)")
+            return
+
+        # Validate thread count
+        try:
+            num_threads = int(thread_count_str)
+            if num_threads < 1 or num_threads > 10:
+                messagebox.showwarning("Invalid Thread Count", "Thread count must be between 1 and 10")
+                return
+        except ValueError:
+            messagebox.showwarning("Invalid Thread Count", "Thread count must be a number")
             return
         
         # Validate output folder
@@ -403,67 +626,101 @@ class LiveATCDownloaderGUI:
         
         # Start download in background
         thread = threading.Thread(target=self._download_thread,
-                                 args=(station, start_datetime, end_datetime, output_folder, delay))
+                                 args=(station, start_datetime, end_datetime, output_folder, delay, num_threads))
         thread.daemon = True
         thread.start()
         
-    def _download_thread(self, station, start_datetime, end_datetime, output_folder, delay):
-        """Background thread for downloading"""
-        import time
+    def _download_thread(self, station, start_datetime, end_datetime, output_folder, delay, num_threads):
+        """Background thread for downloading with multithreading support"""
+        import shutil
+
+        # Generate list of all time intervals to download
+        intervals = []
         current = start_datetime
+        while current <= end_datetime:
+            intervals.append(current)
+            current += timedelta(minutes=30)
+
+        total_intervals = len(intervals)
         downloaded = 0
         failed = 0
-
-        total_intervals = int((end_datetime - start_datetime).total_seconds() / 1800)  # 30 min = 1800 sec
 
         self.root.after(0, self.log, f"Starting download for {station['identifier']}")
         self.root.after(0, self.log, f"Time range: {start_datetime} to {end_datetime} UTC")
         self.root.after(0, self.log, f"Total intervals: {total_intervals}")
         self.root.after(0, self.log, f"Output folder: {output_folder}")
-        self.root.after(0, self.log, f"Delay between downloads: {delay} seconds\n")
-        
-        while current <= end_datetime:
-            # Check if download was cancelled
+        self.root.after(0, self.log, f"Using {num_threads} concurrent thread(s)")
+        self.root.after(0, self.log, f"Delay between downloads: {delay} seconds (per thread)\n")
+
+        def download_single_interval(interval_time):
+            """Download a single time interval"""
             if self.download_cancelled:
-                self.root.after(0, self.log, f"\nDownload cancelled after {downloaded + failed} files")
-                break
-            
-            date_str = current.strftime('%b-%d-%Y')
-            time_str = current.strftime('%H%MZ')
-            
-            progress = f"[{downloaded + failed + 1}/{total_intervals}]"
-            
+                return None
+
+            date_str = interval_time.strftime('%b-%d-%Y')
+            time_str = interval_time.strftime('%H%MZ')
+
             try:
-                self.root.after(0, self.set_status, f"Downloading {date_str} {time_str}...")
-                
                 # Download to temp location first
                 filepath = download_archive(station['identifier'], date_str, time_str)
-                
+
                 # Move to output folder
                 filename = os.path.basename(filepath)
                 dest_path = os.path.join(output_folder, filename)
-                
-                # Move file (handle cross-platform)
-                import shutil
                 shutil.move(filepath, dest_path)
-                
-                downloaded += 1
-                self.root.after(0, self.log, f"{progress} [OK] {date_str} {time_str} -> {filename}")
 
-                # Add delay after successful download (except for the last one)
-                if current + timedelta(minutes=30) <= end_datetime and delay > 0:
-                    self.root.after(0, self.log, f"  Waiting {delay}s before next download...")
-                    time.sleep(delay)
-
+                return {'success': True, 'date': date_str, 'time': time_str, 'filename': filename}
             except Exception as e:
-                failed += 1
                 error_msg = str(e)
                 if len(error_msg) > 100:
                     error_msg = error_msg[:100] + "..."
-                self.root.after(0, self.log, f"{progress} [FAIL] {date_str} {time_str}: {error_msg}")
+                return {'success': False, 'date': date_str, 'time': time_str, 'error': error_msg}
 
-            current += timedelta(minutes=30)
-        
+        # Use ThreadPoolExecutor for concurrent downloads
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            # Submit all download tasks
+            futures = []
+            for idx, interval in enumerate(intervals):
+                if self.download_cancelled:
+                    break
+                future = executor.submit(download_single_interval, interval)
+                futures.append((future, idx + 1, interval))
+
+                # Add delay between submissions to stagger the threads
+                if delay > 0 and idx < len(intervals) - 1:
+                    time.sleep(delay / num_threads)
+
+            # Process results as they complete
+            for future, idx, interval in futures:
+                if self.download_cancelled:
+                    # Cancel remaining futures
+                    future.cancel()
+                    continue
+
+                try:
+                    result = future.result()
+                    if result is None:
+                        # Task was cancelled
+                        continue
+
+                    progress = f"[{idx}/{total_intervals}]"
+
+                    if result['success']:
+                        downloaded += 1
+                        self.root.after(0, self.log,
+                                      f"{progress} [OK] {result['date']} {result['time']} -> {result['filename']}")
+                        self.root.after(0, self.set_status,
+                                      f"Progress: {downloaded + failed}/{total_intervals} ({downloaded} OK, {failed} failed)")
+                    else:
+                        failed += 1
+                        self.root.after(0, self.log,
+                                      f"{progress} [FAIL] {result['date']} {result['time']}: {result['error']}")
+                        self.root.after(0, self.set_status,
+                                      f"Progress: {downloaded + failed}/{total_intervals} ({downloaded} OK, {failed} failed)")
+                except Exception as e:
+                    failed += 1
+                    self.root.after(0, self.log, f"[{idx}/{total_intervals}] [ERROR] Unexpected error: {str(e)}")
+
         # Summary
         if not self.download_cancelled:
             self.root.after(0, self.log, f"\n=== Download Complete ===")
@@ -471,7 +728,7 @@ class LiveATCDownloaderGUI:
             self.root.after(0, self.log, f"\n=== Download Stopped ===")
         self.root.after(0, self.log, f"Successfully downloaded: {downloaded} files")
         self.root.after(0, self.log, f"Failed: {failed} files")
-        
+
         # Re-enable controls
         self.root.after(0, self._download_complete, downloaded, failed)
         
