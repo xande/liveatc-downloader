@@ -227,6 +227,13 @@ class LiveATCDownloaderGUI:
         self.selected_station = None  # Track selected station persistently
         self.downloading = False
         self.download_cancelled = False
+        self.download_paused = False
+
+        # Download state tracking
+        self.pending_intervals = []  # Intervals to be downloaded
+        self.completed_intervals = []  # Successfully downloaded
+        self.failed_intervals = []  # Failed downloads with error info
+        self.download_params = None  # Store download parameters for resume
 
         self.create_widgets()
         
@@ -384,13 +391,13 @@ class LiveATCDownloaderGUI:
         ttk.Label(settings_frame, text="Concurrent downloads:", font=('Arial', 9)).grid(
             row=0, column=0, sticky=tk.W, padx=(0, 5))
 
-        self.thread_count = tk.Spinbox(settings_frame, from_=1, to=10, width=4,
-                                       wrap=True, justify='center')
+        self.thread_count = tk.Spinbox(settings_frame, from_=1, to=100, width=4,
+                                       wrap=False, justify='center')
         self.thread_count.grid(row=0, column=1, padx=(0, 5))
         self.thread_count.delete(0, tk.END)
-        self.thread_count.insert(0, '3')
+        self.thread_count.insert(0, '5')
 
-        ttk.Label(settings_frame, text="threads", font=('Arial', 9)).grid(
+        ttk.Label(settings_frame, text="threads (1-100)", font=('Arial', 9)).grid(
             row=0, column=2, sticky=tk.W, padx=(0, 15))
 
         # Delay between downloads
@@ -408,14 +415,26 @@ class LiveATCDownloaderGUI:
         row += 1
         button_frame = ttk.Frame(main_frame)
         button_frame.grid(row=row, column=0, columnspan=2, pady=(10, 10))
-        
-        self.download_btn = ttk.Button(button_frame, text="Download Archives", 
+
+        self.download_btn = ttk.Button(button_frame, text="Download Archives",
                                        command=self.start_download, state='disabled')
         self.download_btn.grid(row=0, column=0, padx=(0, 5))
-        
-        self.cancel_btn = ttk.Button(button_frame, text="Stop Download", 
+
+        self.pause_btn = ttk.Button(button_frame, text="Pause",
+                                    command=self.pause_download, state='disabled')
+        self.pause_btn.grid(row=0, column=1, padx=(0, 5))
+
+        self.cancel_btn = ttk.Button(button_frame, text="Stop",
                                      command=self.cancel_download, state='disabled')
-        self.cancel_btn.grid(row=0, column=1)
+        self.cancel_btn.grid(row=0, column=2, padx=(0, 15))
+
+        self.retry_btn = ttk.Button(button_frame, text="Retry Failed",
+                                    command=self.retry_failed, state='disabled')
+        self.retry_btn.grid(row=0, column=3, padx=(0, 5))
+
+        self.view_failed_btn = ttk.Button(button_frame, text="View Failed",
+                                          command=self.view_failed, state='disabled')
+        self.view_failed_btn.grid(row=0, column=4)
         
         # ===== PROGRESS LOG =====
         row += 1
@@ -541,8 +560,33 @@ class LiveATCDownloaderGUI:
             self.cancel_btn.config(state='disabled')
     
     def start_download(self):
-        """Start download process"""
-        # Validate inputs - use persistently stored station instead of current listbox selection
+        """Start or resume download process"""
+        # Check if resuming
+        if self.download_paused and self.pending_intervals:
+            # Resume paused download
+            self.download_paused = False
+            self.download_cancelled = False
+            self.downloading = True
+
+            # Update UI
+            self.download_btn.config(state='disabled', text="Download Archives")
+            self.pause_btn.config(state='normal', text="Pause")
+            self.cancel_btn.config(state='normal')
+            self.search_btn.config(state='disabled')
+
+            self.log("\n=== Resuming Download ===\n")
+
+            # Resume with existing parameters
+            params = self.download_params
+            thread = threading.Thread(target=self._download_thread,
+                                     args=(params['station'], None, None,
+                                           params['output_folder'], params['delay'],
+                                           params['num_threads']))
+            thread.daemon = True
+            thread.start()
+            return
+
+        # New download - validate inputs
         if not self.selected_station:
             messagebox.showwarning("No Selection", "Please select a station")
             return
@@ -584,13 +628,13 @@ class LiveATCDownloaderGUI:
         # Validate thread count
         try:
             num_threads = int(thread_count_str)
-            if num_threads < 1 or num_threads > 10:
-                messagebox.showwarning("Invalid Thread Count", "Thread count must be between 1 and 10")
+            if num_threads < 1 or num_threads > 100:
+                messagebox.showwarning("Invalid Thread Count", "Thread count must be between 1 and 100")
                 return
         except ValueError:
             messagebox.showwarning("Invalid Thread Count", "Thread count must be a number")
             return
-        
+
         # Validate output folder
         if not os.path.exists(output_folder):
             try:
@@ -598,32 +642,48 @@ class LiveATCDownloaderGUI:
             except Exception as e:
                 messagebox.showerror("Folder Error", f"Cannot create output folder:\n{e}")
                 return
-        
+
         # Parse dates
         try:
             start_datetime = datetime.strptime(f"{start_date}-{start_time}", '%b-%d-%Y-%H%MZ')
             end_datetime = datetime.strptime(f"{end_date}-{end_time}", '%b-%d-%Y-%H%MZ')
-            
+
             if end_datetime <= start_datetime:
                 messagebox.showwarning("Invalid Range", "End time must be after start time")
                 return
         except ValueError as e:
-            messagebox.showerror("Date Format Error", 
+            messagebox.showerror("Date Format Error",
                                f"Invalid date/time format:\n{e}\n\nUse format: Dec-11-2025 and 1430Z")
             return
-        
-        # Clear log
+
+        # Clear log and reset state for new download
         self.log_text.config(state='normal')
         self.log_text.delete(1.0, tk.END)
         self.log_text.config(state='disabled')
-        
+
+        self.completed_intervals = []
+        self.failed_intervals = []
+        self.pending_intervals = []
+
+        # Store download parameters for resume/retry
+        self.download_params = {
+            'station': station,
+            'output_folder': output_folder,
+            'delay': delay,
+            'num_threads': num_threads
+        }
+
         # Disable controls
         self.download_btn.config(state='disabled')
+        self.pause_btn.config(state='normal', text="Pause")
         self.cancel_btn.config(state='normal')
+        self.retry_btn.config(state='disabled')
+        self.view_failed_btn.config(state='disabled')
         self.search_btn.config(state='disabled')
         self.downloading = True
         self.download_cancelled = False
-        
+        self.download_paused = False
+
         # Start download in background
         thread = threading.Thread(target=self._download_thread,
                                  args=(station, start_datetime, end_datetime, output_folder, delay, num_threads))
@@ -631,30 +691,37 @@ class LiveATCDownloaderGUI:
         thread.start()
         
     def _download_thread(self, station, start_datetime, end_datetime, output_folder, delay, num_threads):
-        """Background thread for downloading with multithreading support"""
+        """Background thread for downloading with multithreading support and pause/resume"""
         import shutil
 
-        # Generate list of all time intervals to download
-        intervals = []
-        current = start_datetime
-        while current <= end_datetime:
-            intervals.append(current)
-            current += timedelta(minutes=30)
+        # If resuming or retrying, use pending_intervals, otherwise generate new list
+        if self.pending_intervals:
+            intervals = self.pending_intervals.copy()
+            self.root.after(0, self.log, f"Resuming with {len(intervals)} remaining interval(s)")
+        else:
+            # Generate list of all time intervals to download
+            intervals = []
+            current = start_datetime
+            while current <= end_datetime:
+                intervals.append(current)
+                current += timedelta(minutes=30)
 
-        total_intervals = len(intervals)
-        downloaded = 0
-        failed = 0
+            self.pending_intervals = intervals.copy()
 
-        self.root.after(0, self.log, f"Starting download for {station['identifier']}")
-        self.root.after(0, self.log, f"Time range: {start_datetime} to {end_datetime} UTC")
-        self.root.after(0, self.log, f"Total intervals: {total_intervals}")
-        self.root.after(0, self.log, f"Output folder: {output_folder}")
-        self.root.after(0, self.log, f"Using {num_threads} concurrent thread(s)")
-        self.root.after(0, self.log, f"Delay between downloads: {delay} seconds (per thread)\n")
+            self.root.after(0, self.log, f"Starting download for {station['identifier']}")
+            self.root.after(0, self.log, f"Time range: {start_datetime} to {end_datetime} UTC")
+            self.root.after(0, self.log, f"Total intervals: {len(intervals)}")
+            self.root.after(0, self.log, f"Output folder: {output_folder}")
+            self.root.after(0, self.log, f"Using {num_threads} concurrent thread(s)")
+            self.root.after(0, self.log, f"Delay between downloads: {delay} seconds (per thread)\n")
+
+        total_intervals = len(self.completed_intervals) + len(self.failed_intervals) + len(intervals)
+        downloaded = len(self.completed_intervals)
+        failed = len(self.failed_intervals)
 
         def download_single_interval(interval_time):
             """Download a single time interval"""
-            if self.download_cancelled:
+            if self.download_cancelled or self.download_paused:
                 return None
 
             date_str = interval_time.strftime('%b-%d-%Y')
@@ -669,30 +736,31 @@ class LiveATCDownloaderGUI:
                 dest_path = os.path.join(output_folder, filename)
                 shutil.move(filepath, dest_path)
 
-                return {'success': True, 'date': date_str, 'time': time_str, 'filename': filename}
+                return {'success': True, 'date': date_str, 'time': time_str, 'filename': filename, 'interval': interval_time}
             except Exception as e:
                 error_msg = str(e)
                 if len(error_msg) > 100:
                     error_msg = error_msg[:100] + "..."
-                return {'success': False, 'date': date_str, 'time': time_str, 'error': error_msg}
+                return {'success': False, 'date': date_str, 'time': time_str, 'error': error_msg, 'interval': interval_time}
 
         # Use ThreadPoolExecutor for concurrent downloads
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             # Submit all download tasks
             futures = []
             for idx, interval in enumerate(intervals):
-                if self.download_cancelled:
+                if self.download_cancelled or self.download_paused:
                     break
                 future = executor.submit(download_single_interval, interval)
-                futures.append((future, idx + 1, interval))
+                futures.append((future, interval))
 
                 # Add delay between submissions to stagger the threads
                 if delay > 0 and idx < len(intervals) - 1:
                     time.sleep(delay / num_threads)
 
             # Process results as they complete
-            for future, idx, interval in futures:
-                if self.download_cancelled:
+            processed = 0
+            for future, interval in futures:
+                if self.download_cancelled or self.download_paused:
                     # Cancel remaining futures
                     future.cancel()
                     continue
@@ -700,58 +768,189 @@ class LiveATCDownloaderGUI:
                 try:
                     result = future.result()
                     if result is None:
-                        # Task was cancelled
+                        # Task was cancelled or paused - keep in pending
                         continue
 
-                    progress = f"[{idx}/{total_intervals}]"
+                    # Remove from pending list
+                    if interval in self.pending_intervals:
+                        self.pending_intervals.remove(interval)
+
+                    processed += 1
+                    current_total = downloaded + failed + processed
+                    progress = f"[{current_total}/{total_intervals}]"
 
                     if result['success']:
                         downloaded += 1
+                        self.completed_intervals.append(result['interval'])
                         self.root.after(0, self.log,
-                                      f"{progress} [OK] {result['date']} {result['time']} -> {result['filename']}")
+                                      f"{progress} ✓ {result['date']} {result['time']} -> {result['filename']}")
                         self.root.after(0, self.set_status,
-                                      f"Progress: {downloaded + failed}/{total_intervals} ({downloaded} OK, {failed} failed)")
+                                      f"Progress: {current_total}/{total_intervals} ({downloaded} OK, {failed} failed)")
                     else:
                         failed += 1
+                        self.failed_intervals.append({'interval': result['interval'], 'error': result['error']})
                         self.root.after(0, self.log,
-                                      f"{progress} [FAIL] {result['date']} {result['time']}: {result['error']}")
+                                      f"{progress} ✗ {result['date']} {result['time']}: {result['error']}")
                         self.root.after(0, self.set_status,
-                                      f"Progress: {downloaded + failed}/{total_intervals} ({downloaded} OK, {failed} failed)")
+                                      f"Progress: {current_total}/{total_intervals} ({downloaded} OK, {failed} failed)")
                 except Exception as e:
                     failed += 1
-                    self.root.after(0, self.log, f"[{idx}/{total_intervals}] [ERROR] Unexpected error: {str(e)}")
+                    if interval in self.pending_intervals:
+                        self.pending_intervals.remove(interval)
+                    self.failed_intervals.append({'interval': interval, 'error': str(e)})
+                    self.root.after(0, self.log, f"[ERROR] Unexpected error: {str(e)}")
 
         # Summary
-        if not self.download_cancelled:
+        if self.download_paused:
+            self.root.after(0, self.log, f"\n=== Download Paused ===")
+            self.root.after(0, self.log, f"Completed: {downloaded} files")
+            self.root.after(0, self.log, f"Failed: {failed} files")
+            self.root.after(0, self.log, f"Remaining: {len(self.pending_intervals)} files")
+        elif not self.download_cancelled:
             self.root.after(0, self.log, f"\n=== Download Complete ===")
+            self.root.after(0, self.log, f"Successfully downloaded: {downloaded} files")
+            self.root.after(0, self.log, f"Failed: {failed} files")
         else:
             self.root.after(0, self.log, f"\n=== Download Stopped ===")
-        self.root.after(0, self.log, f"Successfully downloaded: {downloaded} files")
-        self.root.after(0, self.log, f"Failed: {failed} files")
+            self.root.after(0, self.log, f"Successfully downloaded: {downloaded} files")
+            self.root.after(0, self.log, f"Failed: {failed} files")
 
         # Re-enable controls
         self.root.after(0, self._download_complete, downloaded, failed)
         
     def _download_complete(self, downloaded, failed):
         """Handle download completion"""
-        self.download_btn.config(state='normal')
-        self.cancel_btn.config(state='disabled')
-        self.search_btn.config(state='normal')
         self.downloading = False
-        
-        if self.download_cancelled:
-            self.set_status(f"Download stopped: {downloaded} successful, {failed} failed")
+
+        if self.download_paused:
+            # Paused state
+            self.download_btn.config(text="Resume Download", state='normal')
+            self.pause_btn.config(state='disabled')
+            self.cancel_btn.config(state='normal')
+            self.search_btn.config(state='disabled')
+            self.set_status(f"Download paused: {downloaded} successful, {failed} failed, {len(self.pending_intervals)} remaining")
         else:
-            self.set_status(f"Download complete: {downloaded} successful, {failed} failed")
-        
-        if downloaded > 0 and not self.download_cancelled:
-            messagebox.showinfo("Download Complete", 
-                              f"Downloaded {downloaded} file(s)\nFailed: {failed}\n\n"
-                              f"Files saved to:\n{self.output_entry.get()}")
-        elif downloaded > 0 and self.download_cancelled:
-            messagebox.showinfo("Download Stopped", 
-                              f"Download cancelled.\n\nDownloaded {downloaded} file(s) before stopping\nFailed: {failed}\n\n"
-                              f"Files saved to:\n{self.output_entry.get()}")
+            # Completed or stopped
+            self.download_btn.config(text="Download Archives", state='normal')
+            self.pause_btn.config(state='disabled')
+            self.cancel_btn.config(state='disabled')
+            self.search_btn.config(state='normal')
+
+            if self.download_cancelled:
+                self.set_status(f"Download stopped: {downloaded} successful, {failed} failed")
+            else:
+                self.set_status(f"Download complete: {downloaded} successful, {failed} failed")
+
+            # Enable retry button if there are failed downloads
+            if len(self.failed_intervals) > 0:
+                self.retry_btn.config(state='normal')
+                self.view_failed_btn.config(state='normal')
+            else:
+                self.retry_btn.config(state='disabled')
+                self.view_failed_btn.config(state='disabled')
+
+            if downloaded > 0 and not self.download_cancelled:
+                messagebox.showinfo("Download Complete",
+                                  f"Downloaded {downloaded} file(s)\nFailed: {failed}\n\n"
+                                  f"Files saved to:\n{self.output_entry.get()}")
+            elif downloaded > 0 and self.download_cancelled:
+                messagebox.showinfo("Download Stopped",
+                                  f"Download cancelled.\n\nDownloaded {downloaded} file(s) before stopping\nFailed: {failed}\n\n"
+                                  f"Files saved to:\n{self.output_entry.get()}")
+
+    def pause_download(self):
+        """Pause the current download"""
+        if self.downloading and not self.download_paused:
+            self.download_paused = True
+            self.pause_btn.config(text="Pausing...", state='disabled')
+            self.log("⏸ Pausing download... (will finish current batch)")
+
+    def retry_failed(self):
+        """Retry all failed downloads"""
+        if not self.failed_intervals or not self.download_params:
+            return
+
+        # Ask for confirmation
+        count = len(self.failed_intervals)
+        if not messagebox.askyesno("Retry Failed Downloads",
+                                   f"Retry {count} failed download(s)?"):
+            return
+
+        # Reset state
+        self.pending_intervals = [item['interval'] for item in self.failed_intervals]
+        self.failed_intervals = []
+        self.download_paused = False
+        self.download_cancelled = False
+
+        # Update UI
+        self.download_btn.config(state='disabled', text="Download Archives")
+        self.pause_btn.config(state='normal', text="Pause")
+        self.cancel_btn.config(state='normal')
+        self.retry_btn.config(state='disabled')
+        self.view_failed_btn.config(state='disabled')
+        self.search_btn.config(state='disabled')
+        self.downloading = True
+
+        self.log(f"\n=== Retrying {count} Failed Download(s) ===\n")
+
+        # Start download thread with failed intervals
+        params = self.download_params
+        thread = threading.Thread(target=self._download_thread,
+                                 args=(params['station'], None, None,
+                                       params['output_folder'], params['delay'],
+                                       params['num_threads']))
+        thread.daemon = True
+        thread.start()
+
+    def view_failed(self):
+        """Show a window with all failed downloads"""
+        if not self.failed_intervals:
+            messagebox.showinfo("No Failed Downloads", "There are no failed downloads to view.")
+            return
+
+        # Create popup window
+        failed_window = tk.Toplevel(self.root)
+        failed_window.title("Failed Downloads")
+        failed_window.geometry("700x400")
+
+        # Header
+        header_frame = ttk.Frame(failed_window, padding="10")
+        header_frame.pack(fill=tk.X)
+        ttk.Label(header_frame, text=f"Failed Downloads ({len(self.failed_intervals)} total)",
+                 font=('Arial', 12, 'bold')).pack()
+
+        # List frame
+        list_frame = ttk.Frame(failed_window, padding="10")
+        list_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Create text widget with scrollbar
+        text_scroll = scrolledtext.ScrolledText(list_frame, height=15, font=('Courier', 9))
+        text_scroll.pack(fill=tk.BOTH, expand=True)
+
+        # Populate with failed downloads
+        for i, item in enumerate(self.failed_intervals, 1):
+            interval = item['interval']
+            error = item.get('error', 'Unknown error')
+            date_str = interval.strftime('%b-%d-%Y')
+            time_str = interval.strftime('%H%MZ')
+            text_scroll.insert(tk.END, f"[{i}] {date_str} {time_str}\n")
+            text_scroll.insert(tk.END, f"    Error: {error}\n\n")
+
+        text_scroll.config(state='disabled')
+
+        # Buttons
+        button_frame = ttk.Frame(failed_window, padding="10")
+        button_frame.pack(fill=tk.X)
+
+        def copy_to_clipboard():
+            failed_window.clipboard_clear()
+            text = "\n".join([f"{item['interval'].strftime('%b-%d-%Y %H%MZ')}: {item.get('error', 'Unknown')}"
+                            for item in self.failed_intervals])
+            failed_window.clipboard_append(text)
+            messagebox.showinfo("Copied", "Failed downloads copied to clipboard")
+
+        ttk.Button(button_frame, text="Copy to Clipboard", command=copy_to_clipboard).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Close", command=failed_window.destroy).pack(side=tk.RIGHT, padx=5)
 
 
 def main():
