@@ -4,3 +4,7 @@ requests
 beautifulsoup4
 noisereduce
 tkcalendar
+certifi
+pyannote.audio
+torch
+torchaudio
